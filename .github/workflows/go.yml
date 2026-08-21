@@ -306,6 +306,10 @@ jobs:
     needs: build
     if: ${{ needs.build.result == 'success' && needs.build.outputs.artifact-subjects != '' && needs.build.outputs.publish == 'true' }}
     uses: ./.github/workflows/provenance.yml
+    permissions:
+      id-token: write
+      contents: write
+      attestations: write
     with:
       subjects: ${{ needs.build.outputs.artifact-subjects }}
       sbom-info: ${{ needs.build.outputs.sbom-info }}
