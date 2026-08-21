@@ -9,6 +9,7 @@ on:
 env:
   NDK_VERSION: "28.2.13676358"
   PLATFORM_VERSION: "android-36"
+  GOTOOLCHAIN: local
 
 jobs:
   build-and-deploy:
