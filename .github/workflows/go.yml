@@ -62,6 +62,7 @@ jobs:
       run: |
         VCSVER="${GITHUB_SHA:0:10}"
         curl https://jitpack.io/api/builds/com.github.celzero/firestack/${VCSVER} | jq || true
+        chmod +x make-aar
         ./make-aar nogo debug
       shell: bash
 
