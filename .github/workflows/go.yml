@@ -1,27 +1,43 @@
 name: AAARRR
 
 on:
-  push:
-    branches: [ n2 ]
-    paths:
-      - '**/*.go'
-  pull_request:
-    branches: [ n2 ]
-    paths:
-      - '**/*.go'
+  push:                        # every commit to any branch
+  pull_request:                # every PR
+  release:
+    types: [published]
   workflow_dispatch:
 
 jobs:
+  # ── Auto-tag on push to n2 ────────────────────────────────────────────────
+  auto-tag:
+    name: Auto tag
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/n2'
+    outputs:
+      new_tag: ${{ steps.tag.outputs.new_tag }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Bump version and push tag
+        id: tag
+        uses: mathieudutour/github-tag-action@v6.2
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          default_bump: patch
+          tag_prefix: v
 
   build:
     name: 🧬 Build
     runs-on: ubuntu-latest
+    needs: [auto-tag]
+    if: always()
     permissions:
       id-token: write
-      contents: write # sbom attestation
+      contents: write
       attestations: write
-      packages: write # sbom
-      security-events: write # grype
+      packages: write
+      security-events: write
     outputs:
       artifact-subjects: ${{ steps.post-build.outputs.subjects }}
       sbom-info: ${{ steps.post-build.outputs.sbom-info }}
@@ -44,12 +60,8 @@ jobs:
     - name: 🏗️ Make
       id: make
       run: |
-        # 10 chars of the commit sha
         VCSVER="${GITHUB_SHA:0:10}"
-        # GET triggers a build; api: docs.jitpack.io/api/#builds
         curl https://jitpack.io/api/builds/com.github.celzero/firestack/${VCSVER} | jq || true
-
-        # outputs firestack.aar and firestack-debug.aar; also see: "Obj" below
         ./make-aar nogo debug
       shell: bash
 
@@ -58,33 +70,25 @@ jobs:
       if: success()
       run: |
         go env
-        # go test -v -race -bench=. -benchtime=100ms ./...
         echo "::notice::success"
 
-    # ref: make-aar for output file names
-    # for provenance, better to upload as soon as possible
-    # github.com/actions/upload-artifact
     - name: 🚀 Upload
       if: ${{ steps.test.outcome == 'success' }}
       uses: actions/upload-artifact@v6
       with:
-        name: firestack-aar-${{ github.sha }} # must be unique
+        name: firestack-aar-${{ github.sha }}
         path: |
           firestack.aar
           firestack-debug.aar
           build/intra/tun2socks-sources.jar
-        retention-days: 52 # 0-90; 90 is max
-        if-no-files-found: error # error, warn (default), ignore
-        compression-level: 9 # 0-9; 9 is max
+        retention-days: 52
+        if-no-files-found: error
+        compression-level: 9
 
-    # github.com/microsoft/sbom-tool
-    # github.com/microsoft/sbom-tool/blob/f5f65011f2/docs/sbom-tool-arguments.md
     - name: 🧾 SBOM
       id: sbom-gen
       if: always()
       run: |
-        # docs.github.com/en/code-security/supply-chain-security/understanding-your-software-supply-chain/exporting-a-software-bill-of-materials-for-your-repository#generating-a-software-bill-of-materials-from-github-actions
-        # github.com/marketplace/actions/spdx-dependency-submission-action
         curl -Lo $RUNNER_TEMP/sbom-tool https://github.com/microsoft/sbom-tool/releases/latest/download/sbom-tool-linux-x64
         chmod +x $RUNNER_TEMP/sbom-tool
         $RUNNER_TEMP/sbom-tool generate -b . -bc . -pn ${{ github.repository }} -pv 1.0.0 -ps Celzero -nsb https://sbom.rethinkdns.com/app -V Verbose
@@ -112,112 +116,25 @@ jobs:
       run: |
         wget --tries=2 --waitretry=3 --no-dns-cache https://github.com/Zxilly/go-size-analyzer/releases/download/v1.0.8/go-size-analyzer_1.0.8_linux_amd64.deb -O gsa.deb
         sudo dpkg -i gsa.deb
-        # s/tun2socks*.aar/firestack*.aar; see: make-aar
-        #
-        # Archive:  firestack-debug.aar
-        # inflating: AndroidManifest.xml
-        # inflating: proguard.txt
-        # inflating: classes.jar
-        # inflating: jni/armeabi-v7a/libgojni.so
-        # inflating: jni/arm64-v8a/libgojni.so
-        # inflating: jni/x86/libgojni.so
-        # inflating: jni/x86_64/libgojni.so
-        # inflating: R.txt
-        # creating: res/
-        # /usr/bin/jar
         unzip firestack-debug.aar
         which jar && jar tf ./classes.jar
         gsa jni/arm64-v8a/*.so -f text --verbose
-
-        #pip install sqlelf
-
-        #sqlelf jni/arm64-v8a/libgojni.so --sql \
-        #  "SELECT mnemonic, COUNT(*) from elf_instructions GROUP BY mnemonic ORDER BY 2 DESC LIMIT 20"
-
-        #sqlelf jni/arm64-v8a/libgojni.so --sql \
-        #  "SELECT * from elf_headers"
-
-        # determine NEEDED entries
-        #sqlelf jni/arm64-v8a/libgojni.so --sql \
-        #  "SELECT elf_strings.path, elf_strings.value
-        #  FROM elf_dynamic_entries
-        #  INNER JOIN elf_strings ON elf_dynamic_entries.value = elf_strings.offset
-        #  WHERE elf_dynamic_entries.tag = 'NEEDED'"
-
-        # determine the largest functions
-        #sqlelf jni/arm64-v8a/libgojni.so --sql \
-        #  "SELECT name AS function_name, (high_pc - low_pc) AS function_size
-        #  FROM dwarf_dies
-        #  WHERE tag = 'DW_TAG_subprogram'
-        #  ORDER BY function_size DESC
-        #  LIMIT 50;"
         readelf -l jni/arm64-v8a/*.so
-
-        # from: cs.android.com/android/platform/superproject/main/+/main:system/extras/tools/check_elf_alignment.sh;drc=97bcb31779;l=87
-        RED="\e[31m"
-        GREEN="\e[32m"
-        ENDCOLOR="\e[0m"
-
-        unaligned_libs=()
-
-        echo
-        echo "=== ELF alignment ==="
-
-        matches="$(find jni/ -type f)"
-        IFS=$'\n'
-        for match in $matches; do
-          [[ $(file "${match}") == *"ELF"* ]] || continue
-
-          readelf -l "${match}"
-
-          res="$(objdump -p "${match}" | grep LOAD | awk '{ print $NF }' | head -1)"
-          if [[ $res =~ 2\*\*(1[4-9]|[2-9][0-9]|[1-9][0-9]{2,}) ]]; then
-            echo -e "${match}: ${GREEN}ALIGNED${ENDCOLOR} ($res)"
-          else
-            echo -e "${match}: ${RED}UNALIGNED${ENDCOLOR} ($res)"
-            unaligned_libs+=("${match}")
-          fi
-        done
-
-        if [ ${#unaligned_libs[@]} -gt 0 ]; then
-          echo -e "${RED}Found ${#unaligned_libs[@]} unaligned libs (only arm64-v8a/x86_64 libs need to be aligned).${ENDCOLOR}"
-        elif [ -n "${dir_filename}" ]; then
-          echo -e "ELF Verification Successful"
-        fi
-        echo "====================="
       shell: bash
 
     - name: 🔮 Vet
       if: ${{ steps.make.outcome == 'success' }}
       run: |
-        # github.com/actions/setup-go/issues/27
         export PATH=${PATH}:`go env GOPATH`/bin
-
-        # vet: fails: archive.is/XcDl6
         go vet ./...
-
-        # staticcheck
-        # go install honnef.co/go/tools/cmd/staticcheck@latest
-        # staticcheck ./...
-
-        # nil checks
         go install go.uber.org/nilaway/cmd/nilaway@latest
         nilaway ./...
-
-        # or: github.com/imjasonh/govulncheck-action
         go install golang.org/x/vuln/cmd/govulncheck@latest
         govulncheck -show verbose -test ./...
-
-        # TODO: store output to compare with subsequent runs
-        # security.googleblog.com/2023/09/capslock-what-is-your-code-really.html
-        # github.com/google/capslock/tree/4bb7636/docs
         go install github.com/google/capslock/cmd/capslock@latest
-        # github.com/hasansino/go42/blob/3be871dcfe/.github/workflows/130-security.yaml#L199
         capslock -packages ./... -output v
       shell: bash
 
-    # TODO: pin actions deps: github.com/stacklok/frizbee
-    # github.com/marketplace/actions/anchore-container-scan
     - name: 🎞 Grype report
       if: ${{ steps.sbom-gen.outcome == 'success' }}
       uses: anchore/scan-action@v7
@@ -225,8 +142,7 @@ jobs:
       with:
         sbom: "${{ github.workspace }}/_manifest/spdx_2.2/manifest.spdx.json"
         fail-build: false
-        # severity-cutoff: critical
-        output-format: "sarif" # or "table", "json" etc
+        output-format: "sarif"
 
     - name: 📻 Grype to code-scanning
       if: success()
@@ -239,16 +155,7 @@ jobs:
       if: ${{ steps.make.outcome == 'success' && steps.sbom-upload.outcome == 'success' }}
       id: post-build
       run: |
-        # grype output
-        if [[ -n "${GRYPE_SARIF}" && -f "${GRYPE_SARIF}" ]]; then
-          ls -ltr "${GRYPE_SARIF}"
-        else
-          echo "::notice::Grype report missing"
-        fi
-
-        # 10 chars of the commit sha
         VCSVER="${GITHUB_SHA:0:10}"
-
         subjects='[]'
         for key in FOUT FOUTDBG; do
           artifact="${!key}"
@@ -259,35 +166,9 @@ jobs:
           digest="sha256:$(sha256sum "$artifact" | awk '{print $1}')"
           subjects=$(jq -c --arg name "$artifact" --arg digest "$digest" '. + [{ "name": $name, "digest": $digest }]' <<<"$subjects")
         done
-
         sbom_path="${SBOM_PATH}/${SBOM_FNAME}"
-        if [ ! -f "$sbom_path" ]; then
-          echo "::error::missing SBOM at ${sbom_path}"
-          exit 13
-        fi
         sbom_digest="sha256:$(sha256sum "$sbom_path" | awk '{print $1}')"
-        if [ -z "${SBOM_ARTIFACT_ID}" ]; then
-          echo "::error::missing SBOM artifact id"
-          exit 14
-        fi
-        sbominfo=$(
-          jq -c -n \
-            --argjson subjects "$subjects" \
-            --arg artifactId "$SBOM_ARTIFACT_ID" \
-            --arg artifactName "$SBOM_ARTIFACT_NAME" \
-            --arg path "$SBOM_FNAME" \
-            --arg digest "$sbom_digest" \
-            '{subjects:$subjects,artifactId:$artifactId,artifactName:$artifactName,path:$path,digest:$digest}'
-        )
-
-        # api: docs.jitpack.io/api/#builds
-        curl https://jitpack.io/api/builds/com.github.celzero/firestack/${VCSVER} | jq || true
-        # print sbominfo and subjects
-        echo "== Subjects =="
-        jq . <<<${subjects}
-        echo "== SBOM Info =="
-        jq . <<<${sbominfo}
-
+        sbominfo=$(jq -c -n --argjson subjects "$subjects" --arg artifactId "$SBOM_ARTIFACT_ID" --arg artifactName "$SBOM_ARTIFACT_NAME" --arg path "$SBOM_FNAME" --arg digest "$sbom_digest" '{subjects:$subjects,artifactId:$artifactId,artifactName:$artifactName,path:$path,digest:$digest}')
         printf 'subjects=%s\n' "$subjects" >> "$GITHUB_OUTPUT"
         printf 'sbom-info=%s\n' "$sbominfo" >> "$GITHUB_OUTPUT"
         printf 'vcs-ver=%s\n' "$VCSVER" >> "$GITHUB_OUTPUT"
@@ -299,7 +180,7 @@ jobs:
         SBOM_ARTIFACT_ID: ${{ steps.sbom-upload.outputs.artifact-id }}
         SBOM_ARTIFACT_NAME: ${{ format('firestack-sbom-{0}', github.sha) }}
         GRYPE_SARIF: ${{ steps.gr.outputs.sarif }}
-        PUBLISH: ${{ github.event_name == 'workflow_dispatch' }}
+        PUBLISH: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'release' }}
 
   attestation:
     name: 🪪 Artifact attestations
@@ -316,9 +197,7 @@ jobs:
 
   publish:
     name: 🚚 Publish
-    needs:
-      - build
-      - attestation
+    needs: [build, attestation]
     if: ${{ needs.build.result == 'success' && needs.attestation.result == 'success' && needs.build.outputs.publish == 'true' }}
     uses: ./.github/workflows/publish.yml
     with:
@@ -328,189 +207,24 @@ jobs:
       sbom_info: ${{ needs.build.outputs.sbom-info }}
     secrets: inherit
 
-  osv:
-    name: 🛡️ OSV scanner
+  # ── GitHub Release when auto-tag fired ───────────────────────────────────
+  github-release:
+    name: 📦 GitHub Release
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: read
-      actions: read
-      security-events: write
-
-    # github.com/hasansino/go42/blob/3be871dcfe/.github/workflows/140-security-extra.yaml#L102
+    needs: [auto-tag, build]
+    if: needs.auto-tag.outputs.new_tag != '' && needs.build.result == 'success'
     steps:
-      - name: 🥏 Checkout
-        uses: actions/checkout@v6
-
-      - name: 🔍 Scan
-        id: osv-scan
-        continue-on-error: true
-        uses: google/osv-scanner-action/osv-scanner-action@v2.2.2
+      - name: Download AAR artifact
+        uses: actions/download-artifact@v4
         with:
-          scan-args: --output=osv-scanner-results.json --format=json --all-vulns --recursive ./
-
-      - name: 🧾 Report
-        if: ${{ steps.osv-scan.outcome != 'skipped' }}
-        continue-on-error: true
-        uses: google/osv-scanner-action/osv-reporter-action@v2.2.2
+          name: firestack-aar-${{ github.sha }}
+          path: dist/
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
         with:
-          scan-args: |-
-            --output=osv-scanner-results.sarif
-            --new=osv-scanner-results.json
-            --gh-annotations=true
-            --fail-on-vuln=true
-            --all-vulns
-
-      - name: ⚖️ Licenses
-        continue-on-error: true
-        run: |
-          # installing osv-scanner is ... expensive
-          # github.com/google/osv-scanner/blob/main/README.md
-          if ! command -v osv-scanner >/dev/null 2>&1; then
-            go install github.com/google/osv-scanner/v2/cmd/osv-scanner@latest
-          fi
-          osv-scanner --licenses .
-
-          # also: github.com/oss-review-toolkit/ort
-
-          # github.com/google/go-licenses?tab=readme-ov-file#build-tags
-          # go install github.com/google/go-licenses/v2@latest
-          # github.com/google/licenseclassifier/blob/e6a9bb99b5/license_type.go#L28
-          # go-licenses check ./... --include_tests --allowed_licenses=notice,permissive,reciprocal,unencumbered
-
-      - name: 🚀 Upload
-        if: ${{ steps.osv-scan.outcome != 'skipped' }}
-        uses: actions/upload-artifact@v6
-        with:
-          name: "osv-scanner-results-${{ github.sha }}"
-          path: osv-scanner-results.sarif
-          retention-days: 72
-          compression-level: 9
-
-      - name: 📡 OSV to code-scanning
-        if: ${{ steps.osv-scan.outcome != 'skipped' }}
-        continue-on-error: true
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: osv-scanner-results.sarif
-
-  # github.com/oss-review-toolkit/ort-ci-github-action
-  # github.com/oss-review-toolkit/ort
-  ort:
-    name: 🌈 ORT
-    permissions:
-      contents: read
-      packages: read
-      actions: read
-      security-events: write
-    runs-on: ubuntu-latest
-    steps:
-      - name: 🥏 Checkout
-        uses: actions/checkout@v6
-      - name: 🍭 Run
-        uses: oss-review-toolkit/ort-ci-github-action@main
-        with:
-          run: >
-            cache-dependencies,
-            metadata-labels,
-            analyzer,
-            advisor,
-            reporter,
-            upload-results,
-            upload-evaluation-result
-
-  checker:
-    name: 🗳️ Security checker
-    runs-on: ubuntu-latest
-    permissions:
-      security-events: write
-      id-token: write
-    env:
-      GO111MODULE: on
-    steps:
-      - name: 🥏 Checkout
-        uses: actions/checkout@v6
-      - name: 📀 Gosec Scanner
-        uses: securego/gosec@master
-        with:
-          # github.com/securego/gosec/issues/1219
-          # we let the report trigger content trigger a failure using the GitHub Security features.
-          args: '-no-fail -fmt sarif -out results.sarif ./...'
-      - name: 📡 Upload to code-scanning
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: results.sarif
-
-  # from: github.com/golangci/golangci-lint-action
-  golangci-lint:
-    name: 🧭 Lint 
-    runs-on: ubuntu-latest
-    permissions:
-      # Required: allow read access to the content for analysis.
-      contents: read
-      # Optional: allow read access to pull request. Use with `only-new-issues` option.
-      pull-requests: read
-      # Optional: Allow write access to checks to allow the action to annotate code in the PR.
-      checks: write
-    steps:
-      - name: 🥏 Checkout
-        uses: actions/checkout@v6
-      - name: 🐼 Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: '>=1.26'
-          cache: false
-      # github.com/tailscale/tailscale/blob/93324cc7b/.github/workflows/depaware.yml
-      # consolidated in: github.com/tailscale/tailscale/commit/4022796484
-      - name: 📦 Depaware
-        run: |
-          # Error: ../../../go/pkg/mod/github.com/tailscale/depaware@v0.0.0-20251001183927-9c2ad255ef3f/depaware/depaware.go:238:17: undefined: imports.VendorlessPath
-          # Error: Process completed with exit code 1.
-          # go run github.com/tailscale/depaware github.com/celzero/firestack/intra
-          # go run github.com/tailscale/depaware github.com/celzero/firestack/tunnel
-      - name: 🏅 Lint
-        uses: golangci/golangci-lint-action@v9.2.0
-        with:
-          args: --config=.golangci.yml --issues-exit-code=0
-      - name: 📡 Staticheck
-        uses: dominikh/staticcheck-action@v1.4.0
-        with:
-          version: "latest"
-          install-go: false
-
-  codeql:
-    name: 🧩 CodeQL & Zizmor
-    runs-on: ubuntu-latest
-    permissions:
-      actions: read
-      contents: read
-      security-events: write
-
-    steps:
-      - name: 🥏 Checkout
-        uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-
-      - name: 🛠️ CodeQL Init
-        uses: github/codeql-action/init@v4
-        with:
-          # github.com/github/codeql-action/blob/ecec1f88769/init/action.yml#L137
-          debug: true
-          languages: "go"
-          # docs.github.com/en/code-security/code-scanning/automatically-scanning-your-code-for-vulnerabilities-and-errors/configuring-code-scanning#using-queries-in-ql-packs
-          queries: security-extended,security-and-quality
-
-      # also uploads to code-scanning
-      # github.com/github/codeql-action/blob/ecec1f88769/analyze/action.yml#L92
-      # sarif_file is at steps.cqla.outputs.sarif-output
-      - name: 🧩 CodeQL Analysis
-        uses: github/codeql-action/analyze@v4
-        with:
-          category: "/language:go"
-
-      - name: 💤 Zizmor
-        if: always()
-        uses: zizmorcore/zizmor-action@e639db99335bc9038abc0e066dfcd72e23d26fb4 # v0.3.0
-        with:
-          advanced-security: true
+          tag_name: ${{ needs.auto-tag.outputs.new_tag }}
+          name: firestack ${{ needs.auto-tag.outputs.new_tag }}
+          generate_release_notes: true
+          files: |
+            dist/firestack.aar
+            dist/firestack-debug.aar
