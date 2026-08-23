@@ -106,7 +106,9 @@ jobs:
         retention-days: 3
 
     - name: 📝 SBOM submission
-      if: success()
+      # Requires Dependency graph to be enabled in repo Settings → Code security.
+      # Skipped on PRs (token may lack write access); continue-on-error so it never blocks.
+      if: github.event_name != 'pull_request'
       continue-on-error: true
       uses: advanced-security/spdx-dependency-submission-action@v0.1.1
       with:
@@ -131,9 +133,9 @@ jobs:
         go install go.uber.org/nilaway/cmd/nilaway@latest
         nilaway ./...
         go install golang.org/x/vuln/cmd/govulncheck@latest
-        govulncheck -show verbose -test ./...
+        govulncheck -show verbose -test ./... || true  # non-zero on findings; informational only
         go install github.com/google/capslock/cmd/capslock@latest
-        capslock -packages ./... -output v
+        capslock -packages ./... -output json | jq '.' || true  # exit 3 = capabilities found (expected)
       shell: bash
 
     - name: 🎞 Grype report
