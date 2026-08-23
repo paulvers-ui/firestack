@@ -42,20 +42,20 @@ jobs:
 
       - name: Build AAR
         run: |
-          make clean
-          make intra
+          chmod +x make-aar
+          ./make-aar nogo nodebug
 
       - name: Verify build output
         run: |
-          ls -la build/intra/
-          test -f build/intra/tun2socks.aar
+          ls -la .
+          test -f firestack.aar
 
       - name: Upload build artifact (CI record)
         uses: actions/upload-artifact@v4
         with:
           name: firestack-aar
           path: |
-            build/intra/tun2socks.aar
+            firestack.aar
             build/intra/tun2socks-sources.jar
           if-no-files-found: error
 
@@ -65,35 +65,35 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            build/intra/tun2socks.aar
+            firestack.aar
             build/intra/tun2socks-sources.jar
 
-      # --- 2. Push AAR into paulvers-ui/rethink-app:app/firestack ---
-      - name: Checkout rethink-app
+      # --- 2. Push AAR into paulvers-ui/rethink-app-masque:app/libs ---
+      - name: Checkout rethink-app-masque
         if: github.event_name == 'release'
         uses: actions/checkout@v4
         with:
-          repository: paulvers-ui/rethink-app
+          repository: paulvers-ui/rethink-app-masque
           token: ${{ secrets.RETHINK_APP_PUSH_TOKEN }}
-          path: rethink-app
+          path: rethink-app-masque
 
-      - name: Copy AAR into rethink-app
+      - name: Copy AAR into rethink-app-masque
         if: github.event_name == 'release'
         run: |
-          mkdir -p rethink-app/app/firestack
-          cp build/intra/tun2socks.aar rethink-app/app/firestack/
-          cp build/intra/tun2socks-sources.jar rethink-app/app/firestack/ || true
+          mkdir -p rethink-app-masque/app/libs
+          cp firestack.aar rethink-app-masque/app/libs/firestack-local.aar
+          cp build/intra/tun2socks-sources.jar rethink-app-masque/app/libs/ || true
 
-      - name: Commit and push to rethink-app
+      - name: Commit and push to rethink-app-masque
         if: github.event_name == 'release'
-        working-directory: rethink-app
+        working-directory: rethink-app-masque
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add app/firestack/tun2socks.aar app/firestack/tun2socks-sources.jar
+          git add app/libs/firestack-local.aar app/libs/tun2socks-sources.jar
           if git diff --cached --quiet; then
             echo "No changes to commit."
           else
-            git commit -m "chore: update firestack AAR to ${{ github.event.release.tag_name }}"
+            git commit -m "chore: update firestack AAR to ${{ github.event.release.tag_name }} [skip ci]"
             git push origin HEAD
           fi
